@@ -18,11 +18,11 @@ def parse_args():
     parser.add_argument('--model', type=str, default='adaptive_fusion',
                         choices=['adaptive_fusion', 'concat', 'weighted_sum', 'clip'],
                         help='选择模型: adaptive_fusion, concat, weighted_sum, 或 clip')
-    parser.add_argument('--batch_size', type=int, default=32,
+    parser.add_argument('--batch_size', type=int, default=64,
                         help='批次大小')
-    parser.add_argument('--epochs', type=int, default=50,
+    parser.add_argument('--epochs', type=int, default=20,
                         help='训练轮次')
-    parser.add_argument('--lr', type=float, default=2e-5,
+    parser.add_argument('--lr', type=float, default=1e-5,
                         help='学习率')
     parser.add_argument('--ablation', action='store_true',
                         help='运行消融实验')

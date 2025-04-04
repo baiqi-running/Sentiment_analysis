@@ -272,6 +272,9 @@ class Trainer:
             # 前向传播
             logits, text_features, image_features, alpha = self.model(input_ids, attention_mask, images)
             
+            # 确保标签是长整型
+            labels = labels.long()
+            
             # 分类损失
             classification_loss = self.criterion(logits, labels)
             
@@ -305,7 +308,7 @@ class Trainer:
             
             # 计算准确率
             _, predicted = torch.max(logits, 1)
-            correct += (predicted == labels.argmax(dim=1)).sum().item()
+            correct += (predicted == labels).sum().item()
             
             # 记录alpha值（如果有）
             if alpha is not None:
