@@ -55,8 +55,26 @@ def load_model(model, load_path):
     model.load_state_dict(torch.load(load_path))
 
 
+def setup_matplotlib_chinese():
+    """设置matplotlib支持中文显示"""
+    # 使用Noto Sans CJK字体
+    plt.rcParams['font.family'] = ['Noto Sans CJK JP']
+    
+    # 如果还是显示不了中文，可以尝试以下备选方案
+    try:
+        plt.rcParams['font.sans-serif'] = ['Noto Sans CJK JP', 'DejaVu Sans', 'Arial Unicode MS']
+    except:
+        # 如果上述字体都不可用，使用系统默认字体
+        plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    
+    plt.rcParams['axes.unicode_minus'] = False  # 正确显示负号
+
+
 def visualize_tsne(text_features, image_features, labels, save_path, title="特征t-SNE可视化"):
     """使用t-SNE可视化特征"""
+    # 设置中文显示
+    setup_matplotlib_chinese()
+    
     # 创建保存目录
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     
@@ -69,11 +87,11 @@ def visualize_tsne(text_features, image_features, labels, save_path, title="特�
     all_features = np.vstack([text_features, image_features])
     
     # 创建标签，区分文本和图像特征
-    feature_types = np.array(['文本'] * len(text_features) + ['图像'] * len(image_features))
+    feature_types = np.array(['Text'] * len(text_features) + ['Image'] * len(image_features))  # 使用英文标签
     
-    # 创建情感标签
+    # 创建情感标签（使用英文）
     sentiment_labels = np.concatenate([labels, labels])
-    sentiment_map = {0: '负面', 1: '中性', 2: '正面'}
+    sentiment_map = {0: 'Negative', 1: 'Neutral', 2: 'Positive'}  # 使用英文标签
     sentiment_names = np.array([sentiment_map[label] for label in sentiment_labels])
     
     # 使用t-SNE降维
@@ -84,16 +102,16 @@ def visualize_tsne(text_features, image_features, labels, save_path, title="特�
     df = pd.DataFrame({
         'x': tsne_result[:, 0],
         'y': tsne_result[:, 1],
-        '特征类型': feature_types,
-        '情感': sentiment_names
+        'Feature Type': feature_types,  # 使用英文标签
+        'Sentiment': sentiment_names    # 使用英文标签
     })
     
     # 绘制图像
     plt.figure(figsize=(12, 10))
     sns.scatterplot(
         x='x', y='y',
-        hue='情感',
-        style='特征类型',
+        hue='Sentiment',
+        style='Feature Type',
         palette='viridis',
         data=df,
         alpha=0.7,
@@ -103,7 +121,7 @@ def visualize_tsne(text_features, image_features, labels, save_path, title="特�
     plt.title(title, fontsize=14)
     plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
     plt.tight_layout()
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
 

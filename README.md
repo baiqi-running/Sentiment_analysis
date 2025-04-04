@@ -59,6 +59,28 @@ python main.py --dataset twitter2015 --model adaptive_fusion
 - `--ablation`：是否进行消融实验
 - `--seed`：随机种子，默认 42
 
+### 类别不平衡处理
+
+本项目实现了类权重调整方法来处理类别不平衡问题，可通过以下参数控制：
+
+- `--use_class_weights`：使用类别权重（默认开启）
+- `--no_class_weights`：禁用类别权重
+- `--class_weight_method`：类别权重计算方法，可选 `inverse`、`inverse_sqrt` 或 `effective_samples`
+  - `inverse`：权重与样本数量成反比
+  - `inverse_sqrt`：权重与样本数量平方根成反比（平滑处理）
+  - `effective_samples`：基于有效样本数量的方法 (Cui et al., Class-Balanced Loss, 2019)
+- `--effective_num_beta`：有效样本数量方法的beta参数，默认 0.9999
+
+示例：
+
+```bash
+# 使用有效样本数量方法处理类别不平衡
+python main.py --dataset twitter2015 --model adaptive_fusion --class_weight_method effective_samples --effective_num_beta 0.9999
+
+# 不使用类别权重
+python main.py --dataset twitter2015 --model adaptive_fusion --no_class_weights
+```
+
 ### 消融实验
 
 ```bash

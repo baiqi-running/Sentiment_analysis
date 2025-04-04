@@ -28,6 +28,18 @@ def parse_args():
                         help='运行消融实验')
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子')
+    
+    # 类别不平衡处理参数
+    parser.add_argument('--use_class_weights', action='store_true', default=True,
+                        help='是否使用类别权重')
+    parser.add_argument('--no_class_weights', action='store_false', dest='use_class_weights',
+                        help='禁用类别权重')
+    parser.add_argument('--class_weight_method', type=str, default='inverse',
+                        choices=['inverse', 'inverse_sqrt', 'effective_samples'],
+                        help='类别权重计算方法: inverse, inverse_sqrt, 或 effective_samples')
+    parser.add_argument('--effective_num_beta', type=float, default=0.9999,
+                        help='有效样本数量方法的beta参数')
+    
     return parser.parse_args()
 
 
@@ -41,6 +53,11 @@ def main():
     config.NUM_EPOCHS = args.epochs
     config.LEARNING_RATE = args.lr
     
+    # 设置类别权重配置
+    config.USE_CLASS_WEIGHTS = args.use_class_weights
+    config.CLASS_WEIGHT_METHOD = args.class_weight_method
+    config.EFFECTIVE_NUM_BETA = args.effective_num_beta
+    
     # 设置随机种子
     set_seed(args.seed)
     
@@ -53,6 +70,12 @@ def main():
     logger.info(f"训练轮次: {args.epochs}")
     logger.info(f"学习率: {args.lr}")
     logger.info(f"设备: {config.DEVICE}")
+    
+    # 记录类别权重配置
+    logger.info(f"使用类别权重: {config.USE_CLASS_WEIGHTS}")
+    logger.info(f"类别权重计算方法: {config.CLASS_WEIGHT_METHOD}")
+    if config.CLASS_WEIGHT_METHOD == 'effective_samples':
+        logger.info(f"有效样本数量方法beta: {config.EFFECTIVE_NUM_BETA}")
     
     # 加载数据
     logger.info("加载数据集...")

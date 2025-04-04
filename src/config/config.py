@@ -17,6 +17,11 @@ class Config:
     TEST_RATIO = 0.15
     NOISE_TEST_SAMPLES = 100  # 噪声测试子集样本数
     
+    # 类别不平衡处理参数
+    CLASS_WEIGHT_METHOD = 'inverse'  # 'inverse', 'inverse_sqrt', 'effective_samples'
+    EFFECTIVE_NUM_BETA = 0.9999  # 用于effective_samples方法
+    USE_CLASS_WEIGHTS = True  # 是否使用类别权重
+    
     # 模型参数
     BERT_MODEL_NAME = 'bert-base-uncased'
     VISION_MODEL_NAME = 'resnet50'

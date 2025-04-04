@@ -36,6 +36,9 @@ class Trainer:
         self.config = config
         self.device = config.DEVICE
         
+        # 设置日志记录器
+        self.logger = setup_logger('trainer', os.path.join(config.LOG_DIR, 'training.log'))
+        
         # 将模型移至设备
         self.model.to(self.device)
         
@@ -85,11 +88,22 @@ class Trainer:
                 num_training_steps=total_steps
             )
         
-        # 损失函数
-        self.criterion = nn.CrossEntropyLoss(label_smoothing=config.LABEL_SMOOTHING)
+        # 计算类别权重
+        self.class_weights = self._calculate_class_weights(train_loader)
+        self.logger.info(f"类别权重: {self.class_weights}")
         
-        # 设置日志记录器
-        self.logger = setup_logger('trainer', os.path.join(config.LOG_DIR, 'training.log'))
+        # 带权重的损失函数
+        if self.class_weights is not None:
+            self.criterion = nn.CrossEntropyLoss(
+                weight=self.class_weights,
+                label_smoothing=config.LABEL_SMOOTHING
+            )
+            self.logger.info("使用带类别权重的损失函数")
+        else:
+            self.criterion = nn.CrossEntropyLoss(
+                label_smoothing=config.LABEL_SMOOTHING
+            )
+            self.logger.info("使用标准损失函数（无类别权重）")
         
         # 初始化最佳验证损失和早停计数器
         self.best_val_loss = float('inf')
@@ -102,6 +116,59 @@ class Trainer:
         self.val_accuracies = []
         self.alpha_history = []
         
+    def _calculate_class_weights(self, train_loader):
+        """
+        计算类别权重以处理类别不平衡问题
+        支持多种计算方法：
+        - 'inverse': 权重与样本数量成反比
+        - 'inverse_sqrt': 权重与样本数量平方根成反比
+        - 'effective_samples': 有效样本数量方法（Cui et al., 2019）
+        """
+        # 如果不使用类别权重，返回None
+        if not self.config.USE_CLASS_WEIGHTS:
+            self.logger.info("不使用类别权重")
+            return None
+            
+        # 收集所有标签
+        all_labels = []
+        for batch in train_loader:
+            labels = batch['label']
+            all_labels.extend(labels.numpy())
+        
+        # 统计每个类别的数量
+        label_counts = np.bincount(all_labels, minlength=self.config.NUM_CLASSES)
+        
+        # 记录类别分布
+        self.logger.info(f"训练集类别分布: 负面:{label_counts[0]}, 中性:{label_counts[1]}, 正面:{label_counts[2]}")
+        
+        # 根据选择的方法计算权重
+        if self.config.CLASS_WEIGHT_METHOD == 'inverse':
+            # 权重与样本数量成反比
+            weights = 1.0 / label_counts
+            self.logger.info("使用反比类别权重")
+        elif self.config.CLASS_WEIGHT_METHOD == 'inverse_sqrt':
+            # 权重与样本数量平方根成反比（平滑处理）
+            weights = 1.0 / np.sqrt(label_counts)
+            self.logger.info("使用反比平方根类别权重")
+        elif self.config.CLASS_WEIGHT_METHOD == 'effective_samples':
+            # 有效样本数量方法 (Cui et al., Class-Balanced Loss, 2019)
+            beta = self.config.EFFECTIVE_NUM_BETA
+            weights = (1 - beta) / (1 - beta ** label_counts)
+            self.logger.info(f"使用有效样本数量类别权重，beta={beta}")
+        else:
+            # 默认使用反比权重
+            weights = 1.0 / label_counts
+            self.logger.info("使用默认反比类别权重")
+        
+        # 归一化权重，使其和为NUM_CLASSES
+        weights = weights / weights.sum() * self.config.NUM_CLASSES
+        
+        self.logger.info(f"计算得到的类别权重: {weights}")
+        
+        # 转为张量并移至设备
+        weights_tensor = torch.FloatTensor(weights).to(self.device)
+        return weights_tensor
+    
     def _mixup(self, images, labels, alpha=0.2):
         """Mixup数据增强"""
         if alpha > 0:
@@ -143,8 +210,8 @@ class Trainer:
         W = size[2]
         H = size[3]
         cut_rat = np.sqrt(1. - lam)
-        cut_w = np.int(W * cut_rat)
-        cut_h = np.int(H * cut_rat)
+        cut_w = int(W * cut_rat)
+        cut_h = int(H * cut_rat)
         
         # uniform
         cx = np.random.randint(W)
@@ -173,7 +240,7 @@ class Trainer:
             train_loss, train_acc, alpha_values = self._train_epoch()
             
             # 在验证集上评估
-            val_loss, val_acc = self._validate()
+            val_loss, val_acc, val_f1 = self._validate()
             
             # 记录统计信息
             self.train_losses.append(train_loss)
@@ -190,7 +257,7 @@ class Trainer:
             
             # 记录训练日志
             self.logger.info(f"训练损失: {train_loss:.4f}, 训练准确率: {train_acc:.4f}")
-            self.logger.info(f"验证损失: {val_loss:.4f}, 验证准确率: {val_acc:.4f}")
+            self.logger.info(f"验证损失: {val_loss:.4f}, 验证准确率: {val_acc:.4f}, 验证F1: {val_f1:.4f}")
             self.logger.info(f"学习率: {current_lr:.6f}")
             self.logger.info(f"轮次耗时: {elapsed_time:.2f}秒")
             
@@ -275,7 +342,7 @@ class Trainer:
             # 确保标签是长整型
             labels = labels.long()
             
-            # 分类损失
+            # 分类损失（已在__init__中添加了类别权重）
             classification_loss = self.criterion(logits, labels)
             
             # 对比损失
@@ -332,6 +399,8 @@ class Trainer:
         total_loss = 0.0
         total_samples = 0
         correct = 0
+        all_preds = []
+        all_labels = []
         
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="验证"):
@@ -354,12 +423,23 @@ class Trainer:
                 # 计算准确率
                 _, predicted = torch.max(logits, 1)
                 correct += (predicted == labels).sum().item()
+                
+                # 收集预测和标签用于计算F1
+                all_preds.extend(predicted.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
         
         # 计算平均损失和准确率
         avg_loss = total_loss / total_samples
         accuracy = correct / total_samples
         
-        return avg_loss, accuracy
+        # 计算F1分数
+        f1 = f1_score(np.array(all_labels), np.array(all_preds), average='macro')
+        
+        # 统计验证集标签分布
+        label_counts = np.bincount(np.array(all_labels))
+        self.logger.info(f"验证集标签分布: 负面:{label_counts[0]}, 中性:{label_counts[1]}, 正面:{label_counts[2]}")
+        
+        return avg_loss, accuracy, f1
     
     def evaluate(self, data_loader, data_name="测试集"):
         """评估模型性能"""

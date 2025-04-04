@@ -23,16 +23,24 @@ class CrossAttention(nn.Module):
         Returns:
             attended_features: [batch_size, query_seq_len, hidden_dim]
         """
+        # 重塑输入张量以确保维度正确
+        if len(query.shape) == 2:
+            query = query.unsqueeze(1)
+        if len(key.shape) == 2:
+            key = key.unsqueeze(1)
+        if len(value.shape) == 2:
+            value = value.unsqueeze(1)
+            
         Q = self.query_proj(query)  # [batch_size, query_seq_len, hidden_dim]
         K = self.key_proj(key)      # [batch_size, key_seq_len, hidden_dim]
         V = self.value_proj(value)  # [batch_size, key_seq_len, hidden_dim]
         
         # 计算注意力权重
-        attention_scores = torch.matmul(Q, K.transpose(-1, -2)) / self.scale  # [batch_size, query_seq_len, key_seq_len]
+        attention_scores = torch.matmul(Q, K.transpose(-1, -2)) / self.scale
         attention_weights = F.softmax(attention_scores, dim=-1)
         
         # 加权求和
-        attended_features = torch.matmul(attention_weights, V)  # [batch_size, query_seq_len, hidden_dim]
+        attended_features = torch.matmul(attention_weights, V)
         
         return attended_features
 
@@ -86,24 +94,22 @@ class AdaptiveFusionModel(nn.Module):
         self.image_encoder = nn.Sequential(*modules)
         self.image_dim = config.IMAGE_EMBED_DIM
         
-        # 图像特征变换层
-        self.image_proj = nn.Linear(self.image_dim, config.FUSION_DIM)
-        
-        # 文本特征变换层
+        # 特征投影层
         self.text_proj = nn.Linear(self.text_dim, config.FUSION_DIM)
+        self.image_proj = nn.Linear(self.image_dim, config.FUSION_DIM)
         
         # 双路交叉注意力
         self.text_to_image_attention = CrossAttention(
-            query_dim=self.text_dim,
-            key_dim=self.image_dim,
-            value_dim=self.image_dim,
+            query_dim=config.FUSION_DIM,
+            key_dim=config.FUSION_DIM,
+            value_dim=config.FUSION_DIM,
             hidden_dim=config.FUSION_DIM
         )
         
         self.image_to_text_attention = CrossAttention(
-            query_dim=self.image_dim,
-            key_dim=self.text_dim,
-            value_dim=self.text_dim,
+            query_dim=config.FUSION_DIM,
+            key_dim=config.FUSION_DIM,
+            value_dim=config.FUSION_DIM,
             hidden_dim=config.FUSION_DIM
         )
         
@@ -122,7 +128,6 @@ class AdaptiveFusionModel(nn.Module):
             nn.Linear(config.FUSION_DIM, config.NUM_CLASSES)
         )
         
-        # 随机深度
         self.stochastic_depth = config.STOCHASTIC_DEPTH
         self.layer_drop = config.LAYER_DROP
         
@@ -143,7 +148,6 @@ class AdaptiveFusionModel(nn.Module):
     def encode_text(self, input_ids, attention_mask):
         """文本编码"""
         outputs = self.text_encoder(input_ids, attention_mask=attention_mask)
-        # 使用[CLS]标记作为句子表示
         text_features = outputs.last_hidden_state[:, 0, :]  # [batch_size, text_dim]
         text_seq_features = outputs.last_hidden_state  # [batch_size, seq_len, text_dim]
         return text_features, text_seq_features
@@ -153,9 +157,7 @@ class AdaptiveFusionModel(nn.Module):
         batch_size = images.size(0)
         image_features = self.image_encoder(images)
         image_features = image_features.view(batch_size, -1)  # [batch_size, image_dim]
-        # 将图像特征转换为序列形式，方便注意力计算
-        image_seq_features = image_features.unsqueeze(1)  # [batch_size, 1, image_dim]
-        return image_features, image_seq_features
+        return image_features, image_features.unsqueeze(1)  # 返回 [batch_size, image_dim] 和 [batch_size, 1, image_dim]
     
     def forward(self, input_ids, attention_mask, images):
         """
@@ -177,36 +179,42 @@ class AdaptiveFusionModel(nn.Module):
         text_features = self._stochastic_depth(text_features, lambda x: x, self.stochastic_depth)
         image_features = self._stochastic_depth(image_features, lambda x: x, self.stochastic_depth)
         
+        # 首先进行特征投影到相同维度
+        text_proj = self.text_proj(text_features)  # [batch_size, fusion_dim]
+        image_proj = self.image_proj(image_features)  # [batch_size, fusion_dim]
+        
+        # 将序列特征投影到相同的维度
+        text_seq_proj = self.text_proj(text_seq_features)  # [batch_size, seq_len, fusion_dim]
+        # 处理图像序列特征
+        batch_size = image_features.size(0)
+        image_seq_proj = image_proj.view(batch_size, 1, -1)  # [batch_size, 1, fusion_dim]
+        
         # 交叉注意力
         attended_image_features = self._layer_drop(
-            text_seq_features,
+            text_seq_proj,
             lambda x: self.text_to_image_attention(
                 query=x,
-                key=image_seq_features,
-                value=image_seq_features
+                key=image_seq_proj,
+                value=image_seq_proj
             ),
             self.layer_drop
         )
         
         attended_text_features = self._layer_drop(
-            image_seq_features,
+            image_seq_proj,
             lambda x: self.image_to_text_attention(
                 query=x,
-                key=text_seq_features,
-                value=text_seq_features
+                key=text_seq_proj,
+                value=text_seq_proj
             ),
             self.layer_drop
         )
         
         # 提取注意力后的特征
-        attended_image_features = attended_image_features[:, 0, :]
-        attended_text_features = attended_text_features[:, 0, :]
+        attended_image_features = attended_image_features.mean(dim=1)  # [batch_size, fusion_dim]
+        attended_text_features = attended_text_features.mean(dim=1)  # [batch_size, fusion_dim]
         
-        # 投影到共同的特征空间
-        text_proj = self._stochastic_depth(text_features, self.text_proj, self.stochastic_depth)
-        image_proj = self._stochastic_depth(image_features, self.image_proj, self.stochastic_depth)
-        
-        # 特征增强
+        # 特征增强（现在维度都是 fusion_dim）
         enhanced_text_features = text_proj + attended_text_features
         enhanced_image_features = image_proj + attended_image_features
         
