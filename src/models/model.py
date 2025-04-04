@@ -78,13 +78,13 @@ class AdaptiveFusionModel(nn.Module):
         
         # 文本编码器 (BERT)
         self.text_encoder = BertModel.from_pretrained(config.BERT_MODEL_NAME)
-        self.text_dim = self.text_encoder.config.hidden_size  # 768
+        self.text_dim = self.text_encoder.config.hidden_size
         
         # 图像编码器 (ResNet-50)
         vision_model = models.resnet50(pretrained=True)
-        modules = list(vision_model.children())[:-1]  # 移除最后的分类层
+        modules = list(vision_model.children())[:-1]
         self.image_encoder = nn.Sequential(*modules)
-        self.image_dim = config.IMAGE_EMBED_DIM  # 2048
+        self.image_dim = config.IMAGE_EMBED_DIM
         
         # 图像特征变换层
         self.image_proj = nn.Linear(self.image_dim, config.FUSION_DIM)
@@ -93,7 +93,6 @@ class AdaptiveFusionModel(nn.Module):
         self.text_proj = nn.Linear(self.text_dim, config.FUSION_DIM)
         
         # 双路交叉注意力
-        # 文本->图像的注意力
         self.text_to_image_attention = CrossAttention(
             query_dim=self.text_dim,
             key_dim=self.image_dim,
@@ -101,7 +100,6 @@ class AdaptiveFusionModel(nn.Module):
             hidden_dim=config.FUSION_DIM
         )
         
-        # 图像->文本的注意力
         self.image_to_text_attention = CrossAttention(
             query_dim=self.image_dim,
             key_dim=self.text_dim,
@@ -124,6 +122,24 @@ class AdaptiveFusionModel(nn.Module):
             nn.Linear(config.FUSION_DIM, config.NUM_CLASSES)
         )
         
+        # 随机深度
+        self.stochastic_depth = config.STOCHASTIC_DEPTH
+        self.layer_drop = config.LAYER_DROP
+        
+    def _stochastic_depth(self, x, layer, p=0.1):
+        """随机深度"""
+        if self.training and p > 0:
+            if torch.rand(1) < p:
+                return x
+        return layer(x)
+    
+    def _layer_drop(self, x, layer, p=0.1):
+        """层dropout"""
+        if self.training and p > 0:
+            if torch.rand(1) < p:
+                return x
+        return layer(x)
+    
     def encode_text(self, input_ids, attention_mask):
         """文本编码"""
         outputs = self.text_encoder(input_ids, attention_mask=attention_mask)
@@ -157,26 +173,38 @@ class AdaptiveFusionModel(nn.Module):
         text_features, text_seq_features = self.encode_text(input_ids, attention_mask)
         image_features, image_seq_features = self.encode_image(images)
         
+        # 应用随机深度
+        text_features = self._stochastic_depth(text_features, lambda x: x, self.stochastic_depth)
+        image_features = self._stochastic_depth(image_features, lambda x: x, self.stochastic_depth)
+        
         # 交叉注意力
-        attended_image_features = self.text_to_image_attention(
-            query=text_seq_features,  # [batch_size, seq_len, text_dim]
-            key=image_seq_features,   # [batch_size, 1, image_dim]
-            value=image_seq_features  # [batch_size, 1, image_dim]
+        attended_image_features = self._layer_drop(
+            text_seq_features,
+            lambda x: self.text_to_image_attention(
+                query=x,
+                key=image_seq_features,
+                value=image_seq_features
+            ),
+            self.layer_drop
         )
         
-        attended_text_features = self.image_to_text_attention(
-            query=image_seq_features,  # [batch_size, 1, image_dim]
-            key=text_seq_features,     # [batch_size, seq_len, text_dim]
-            value=text_seq_features    # [batch_size, seq_len, text_dim]
+        attended_text_features = self._layer_drop(
+            image_seq_features,
+            lambda x: self.image_to_text_attention(
+                query=x,
+                key=text_seq_features,
+                value=text_seq_features
+            ),
+            self.layer_drop
         )
         
         # 提取注意力后的特征
-        attended_image_features = attended_image_features[:, 0, :]  # [batch_size, fusion_dim]
-        attended_text_features = attended_text_features[:, 0, :]    # [batch_size, fusion_dim]
+        attended_image_features = attended_image_features[:, 0, :]
+        attended_text_features = attended_text_features[:, 0, :]
         
         # 投影到共同的特征空间
-        text_proj = self.text_proj(text_features)  # [batch_size, fusion_dim]
-        image_proj = self.image_proj(image_features)  # [batch_size, fusion_dim]
+        text_proj = self._stochastic_depth(text_features, self.text_proj, self.stochastic_depth)
+        image_proj = self._stochastic_depth(image_features, self.image_proj, self.stochastic_depth)
         
         # 特征增强
         enhanced_text_features = text_proj + attended_text_features

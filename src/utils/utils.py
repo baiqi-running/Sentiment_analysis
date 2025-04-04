@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 import seaborn as sns
 import pandas as pd
+import matplotlib as mpl
 
 
 def setup_logger(name, log_file, level=logging.INFO):
@@ -162,4 +163,11 @@ def get_label_distribution(labels):
     """获取标签分布"""
     unique_labels, counts = np.unique(labels, return_counts=True)
     distribution = {label: count for label, count in zip(unique_labels, counts)}
-    return distribution 
+    return distribution
+
+
+def set_chinese_font():
+    """设置matplotlib中文字体"""
+    # 设置中文字体，需要系统安装了对应的字体
+    plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+    plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号 

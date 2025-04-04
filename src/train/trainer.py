@@ -5,15 +5,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim import AdamW, Adam, SGD
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, LambdaLR
 from transformers import get_linear_schedule_with_warmup
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 import logging
 import matplotlib.pyplot as plt
 
 from ..config.config import Config
-from ..utils.utils import setup_logger, save_model, load_model
+from ..utils.utils import setup_logger, save_model, load_model, set_chinese_font
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, test_loader, noise_test_loader, config):
@@ -40,22 +40,50 @@ class Trainer:
         self.model.to(self.device)
         
         # 设置优化器
-        self.optimizer = AdamW(
-            self.model.parameters(),
-            lr=config.LEARNING_RATE,
-            weight_decay=config.WEIGHT_DECAY
-        )
+        if config.OPTIMIZER == 'adamw':
+            self.optimizer = AdamW(
+                self.model.parameters(),
+                lr=config.LEARNING_RATE,
+                weight_decay=config.WEIGHT_DECAY
+            )
+        elif config.OPTIMIZER == 'adam':
+            self.optimizer = Adam(
+                self.model.parameters(),
+                lr=config.LEARNING_RATE,
+                weight_decay=config.WEIGHT_DECAY
+            )
+        elif config.OPTIMIZER == 'sgd':
+            self.optimizer = SGD(
+                self.model.parameters(),
+                lr=config.LEARNING_RATE,
+                momentum=config.MOMENTUM,
+                nesterov=config.NESTEROV,
+                weight_decay=config.WEIGHT_DECAY
+            )
         
         # 计算总训练步数
         total_steps = len(train_loader) * config.NUM_EPOCHS
         warmup_steps = int(total_steps * config.WARMUP_RATIO)
         
         # 设置学习率调度器
-        self.scheduler = get_linear_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=total_steps
-        )
+        if config.SCHEDULER == 'cosine':
+            self.scheduler = CosineAnnealingLR(
+                self.optimizer,
+                T_max=total_steps,
+                eta_min=config.MIN_LR
+            )
+        elif config.SCHEDULER == 'step':
+            self.scheduler = StepLR(
+                self.optimizer,
+                step_size=config.STEP_SIZE,
+                gamma=config.GAMMA
+            )
+        else:  # linear
+            self.scheduler = get_linear_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=total_steps
+            )
         
         # 损失函数
         self.criterion = nn.CrossEntropyLoss(label_smoothing=config.LABEL_SMOOTHING)
@@ -74,6 +102,61 @@ class Trainer:
         self.val_accuracies = []
         self.alpha_history = []
         
+    def _mixup(self, images, labels, alpha=0.2):
+        """Mixup数据增强"""
+        if alpha > 0:
+            lam = np.random.beta(alpha, alpha)
+        else:
+            lam = 1
+        
+        batch_size = images.size(0)
+        index = torch.randperm(batch_size).to(images.device)
+        
+        mixed_images = lam * images + (1 - lam) * images[index, :]
+        mixed_labels = lam * labels + (1 - lam) * labels[index]
+        
+        return mixed_images, mixed_labels
+    
+    def _cutmix(self, images, labels, alpha=0.2):
+        """CutMix数据增强"""
+        if alpha > 0:
+            lam = np.random.beta(alpha, alpha)
+        else:
+            lam = 1
+        
+        batch_size = images.size(0)
+        index = torch.randperm(batch_size).to(images.device)
+        
+        # 生成随机边界框
+        bbx1, bby1, bbx2, bby2 = self._rand_bbox(images.size(), lam)
+        
+        # 应用CutMix
+        images[:, :, bbx1:bbx2, bby1:bby2] = images[index, :, bbx1:bbx2, bby1:bby2]
+        lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (images.size()[-1] * images.size()[-2]))
+        
+        mixed_labels = lam * labels + (1 - lam) * labels[index]
+        
+        return images, mixed_labels
+    
+    def _rand_bbox(self, size, lam):
+        """生成随机边界框"""
+        W = size[2]
+        H = size[3]
+        cut_rat = np.sqrt(1. - lam)
+        cut_w = np.int(W * cut_rat)
+        cut_h = np.int(H * cut_rat)
+        
+        # uniform
+        cx = np.random.randint(W)
+        cy = np.random.randint(H)
+        
+        bbx1 = np.clip(cx - cut_w // 2, 0, W)
+        bby1 = np.clip(cy - cut_h // 2, 0, H)
+        bbx2 = np.clip(cx + cut_w // 2, 0, W)
+        bby2 = np.clip(cy + cut_h // 2, 0, H)
+        
+        return bbx1, bby1, bbx2, bby2
+    
     def train(self):
         """训练模型"""
         self.logger.info(f"开始训练，设备：{self.device}")
@@ -177,6 +260,12 @@ class Trainer:
             images = batch['image'].to(self.device)
             labels = batch['label'].to(self.device)
             
+            # 应用数据增强
+            if np.random.random() < 0.5:
+                images, labels = self._mixup(images, labels, self.config.MIXUP_ALPHA)
+            else:
+                images, labels = self._cutmix(images, labels, self.config.CUTMIX_ALPHA)
+            
             # 清零梯度
             self.optimizer.zero_grad()
             
@@ -202,7 +291,7 @@ class Trainer:
             loss.backward()
             
             # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.GRADIENT_CLIP)
             
             # 更新参数
             self.optimizer.step()
@@ -216,7 +305,7 @@ class Trainer:
             
             # 计算准确率
             _, predicted = torch.max(logits, 1)
-            correct += (predicted == labels).sum().item()
+            correct += (predicted == labels.argmax(dim=1)).sum().item()
             
             # 记录alpha值（如果有）
             if alpha is not None:
@@ -335,6 +424,9 @@ class Trainer:
     
     def _save_training_curves(self):
         """保存训练和验证曲线"""
+        # 设置中文字体
+        set_chinese_font()
+        
         # 创建图像目录
         plots_dir = os.path.join(self.config.RESULT_DIR, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
@@ -367,6 +459,9 @@ class Trainer:
         """分析模态权重分布"""
         if not self.alpha_history:
             return
+        
+        # 设置中文字体
+        set_chinese_font()
         
         # 创建图像目录
         plots_dir = os.path.join(self.config.RESULT_DIR, 'plots')
